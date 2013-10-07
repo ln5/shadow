@@ -59,6 +59,8 @@ static void _scallion_new(gint argc, gchar* argv[]) {
 
 	if(g_ascii_strncasecmp(tortype, "dirauth", strlen("dirauth")) == 0) {
 		ntype = VTOR_DIRAUTH;
+	} else if(g_ascii_strncasecmp(tortype, "bridgeauth", strlen("bridgeauth")) == 0) {
+		ntype = VTOR_BRIDGEAUTH;
 	} else if(g_ascii_strncasecmp(tortype, "relay", strlen("relay")) == 0) {
 		ntype = VTOR_RELAY;
 	} else if(g_ascii_strncasecmp(tortype, "exitrelay", strlen("exitrelay")) == 0) {

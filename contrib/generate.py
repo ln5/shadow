@@ -15,6 +15,7 @@ CPUFREQS=["2200000", "2400000", "2600000", "2800000", "3000000", "3200000", "340
 
 NRELAYS = 10
 NAUTHS = 1
+NBRIDGEAUTHS = 0
 NCLIENTS = 100
 FIM = 0.02
 FWEB = 0.89
@@ -79,27 +80,6 @@ class Relay():
         self.maxwrite = max(self.maxwrite, write)
         
     def computeSpeeds(self):
-        '''
-        compute the link speeds to the ISP
-        
-        we prefer relay measurements over the consensus, because the measurement
-        is generally more accurate and unlikely malicious
-        
-        we can estimate the link speed as the maximum bandwidth we've ever seen.
-        this is usually the observed bandwidth from the server descriptor since
-        its computed over 10 second intervals rather than the read/write histories
-        from the extra-info which are averaged over 15 minutes.
-        
-        since the observed bandwidth reported in the server descriptor is the minimum
-        of the 10 second interval reads and writes, we use the extra-infos
-        to determine which of read or write this observed bandwidth likely
-        corresponds to. then we compute the missing observed value (the max of the
-        10 second interval reads and writes) using the ratio of read/write from the
-        extra-info.
-        
-        in the absence of historical data we fall back to the consensus bandwidth 
-        and hope that TorFlow accurately measured in this case
-        '''
         if self.maxobserved > 0:
             if self.maxread > 0 and self.maxwrite > 0:
                 # yay, best case as we have all the data
@@ -128,18 +108,6 @@ class Relay():
             self.download = bw
             self.upload = bw
             
-        # the 'tiered' approach, not currently used
-        '''
-        if self.ispbandwidth <= 512: self.ispbandwidth = 512
-        elif self.ispbandwidth <= 1024: self.ispbandwidth = 1024 # 1 MiB
-        elif self.ispbandwidth <= 10240: self.ispbandwidth = 10240 # 10 MiB
-        elif self.ispbandwidth <= 25600: self.ispbandwidth = 25600 # 25 MiB
-        elif self.ispbandwidth <= 51200: self.ispbandwidth = 51200 # 50 MiB
-        elif self.ispbandwidth <= 76800: self.ispbandwidth = 76800 # 75 MiB
-        elif self.ispbandwidth <= 102400: self.ispbandwidth = 102400 # 100 MiB
-        elif self.ispbandwidth <= 153600: self.ispbandwidth = 153600 # 150 MiB
-        else: self.ispbandwidth = 204800
-        '''
         
     CSVHEADER = "IP,CCode,IsExit,IsGuard,Consensus(KB/s),Rate(KiB/s),Burst(KiB/s),MaxObserved(KiB/s),MaxRead(KiB/s),MaxWrite(KiB/s),LinkDown(KiB/s),LinkUp(KiB/s),Load(KiB/s)"
 
@@ -167,7 +135,8 @@ def main():
         
     # configuration options
     ap.add_argument('-p', '--prefix', action="store", dest="prefix", help="PATH to base Shadow installation", metavar="PATH", default=INSTALLPREFIX)
-    ap.add_argument('--nauths', action="store", type=int, dest="nauths", help="number N of total authorities for the generated topology", metavar='N', default=NAUTHS)
+    ap.add_argument('--nauths', action="store", type=int, dest="nauths", help="number N of total directory authorities for the generated topology", metavar='N', default=NAUTHS)
+    ap.add_argument('--nbridgeauths', action="store", type=int, dest="nbridgeauths", help="number N of bridge authorities for the generated topology (0 or 1)", metavar='N', default=NBRIDGEAUTHS)
     ap.add_argument('--nrelays', action="store", type=int, dest="nrelays", help="number N of total relays for the generated topology", metavar='N', default=NRELAYS)
     ap.add_argument('--nclients', action="store", type=int, dest="nclients", help="number N of total clients for the generated topology", metavar='N', default=NCLIENTS)
     ap.add_argument('--fim', action="store", type=float, dest="fim", help="fraction F of interactive client connections", metavar='F', default=FIM)
@@ -215,6 +184,22 @@ def main():
     generate(args)
     log("finished generating:\n{0}/relays.csv\n{0}/hosts.xml\n{0}/im.dl\n{0}/web.dl\n{0}/bulk.dl\n{0}/webthink.dat\n{0}/imthink.dat".format(os.getcwd()))
 
+def getfp(torbin, torrc):
+    """Run Tor with --list-fingerprint to get its fingerprint, read
+    the fingerprint file and return the fingerprint. Uses current
+    directory for DataDir. Returns a two-element list where the first
+    element is an integer return code from running tor (0 for success)
+    and the second is a string with the fingerprint, or None on
+    failure."""
+    listfp = "{0} --list-fingerprint --DataDirectory . -f {1}".format(torbin, torrc)
+    retcode = subprocess.call(shlex.split(listfp))
+    if retcode !=0: return retcode, None
+    fp = None
+    with open("fingerprint", 'r') as f:
+        fp = f.readline().strip().split()[1]
+        fp = " ".join(fp[i:i+4] for i in range(0, len(fp), 4))
+    return 0, fp
+    
 def generate(args):
     # get list of relays, sorted by increasing bandwidth
     validyear, validmonth, relays = parse_consensus(args.consensus)
@@ -351,8 +336,8 @@ def generate(args):
     with open("perfthink.dat", "wb") as fthink:
         print >>fthink, "{0} {1}".format("%.3f" % ms, "%.10f" % 1.0)
     
-    # tor authorities - choose the fastest relays (no authority is an exit node)
-    auths = [] # [name, v3ident, fingerprint] for torrc files
+    # tor directory authorities - choose the fastest relays (no authority is an exit node)
+    dirauths = [] # [name, v3ident, fingerprint] for torrc files
     os.makedirs("authoritydata")
     os.chdir("authoritydata")
     with open("authgen.torrc", 'w') as fauthgen: print >>fauthgen, "DirServer test 127.0.0.1:5000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000\nORPort 5000\n"
@@ -372,20 +357,16 @@ def generate(args):
         # generate keys for tor
         os.makedirs(name)
         os.chdir(name)
-        listfp = "{0} --list-fingerprint --DataDirectory . -f ../authgen.torrc".format(args.torbin)
-        retcode = subprocess.call(shlex.split(listfp))
-        if retcode !=0: return retcode
+        rc, fp = getfp(args.torbin, '../authgen.torrc')
+        if rc != 0: return rc
         gencert = "{0} --create-identity-key -m 24 --passphrase-fd 0".format(args.torgencertbin)
         with open("../authgen.pw", 'r') as pwin: retcode = subprocess.call(shlex.split(gencert), stdin=pwin)
         if retcode !=0: return retcode
         with open("authority_certificate", 'r') as f: 
             for line in f:
                 if 'fingerprint' in line: auth.append(line.strip().split()[1]) # v3ident
-        with open("fingerprint", 'r') as f: 
-            fp = f.readline().strip().split()[1]
-            fp = " ".join(fp[i:i+4] for i in range(0, len(fp), 4))
-            auth.append(fp)
-        auths.append(auth)
+        auth.append(fp)
+        dirauths.append(auth)
         shutil.move("authority_certificate", "keys/.")
         shutil.move("authority_identity_key", "keys/.")
         shutil.move("authority_signing_key", "keys/.")
@@ -394,8 +375,38 @@ def generate(args):
         i += 1
     os.chdir("..")
 
+    # tor bridge authority
+    bridgeauths = []                    # [name, None, fingerprint]
+    '''
+    os.makedirs("bridgeauthoritydata")
+    os.chdir("bridgeauthoritydata")
+    with open("bridgeauthgen.torrc", 'w') as fauthgen:
+        # FIXME where does the port number get changed?
+        print >>fauthgen, "AlternateBridgeAuthority test 127.0.0.1:5000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000\nORPort 5000\n"
+    '''
+    i = 1
+    while i <= args.nbridgeauths:
+        auth = []
+        name = "bridgeauth{0}".format(i)
+        auth.append(name)
+        auth.append(None)
+        bridgeauthority = guards_nodes.pop()
+        torargs = "bridgeauth {0} {1} {2} ./bridgeauthority.torrc ./data/bridgeauthoritydata {3}share/geoip".format(bridgeauthority.getBWConsensusArg(), bridgeauthority.getBWRateArg(), bridgeauthority.getBWBurstArg(), INSTALLPREFIX) # in bytes
+        addRelayToXML(root, starttime, torargs, None, None, name, bridgeauthority.download, bridgeauthority.upload, bridgeauthority.ip, bridgeauthority.code)
+
+        # generate certificate in order to get the fingerprint
+        os.makedirs(name)
+        os.chdir(name)
+        rc, fp = getfp(args.torbin, '../authgen.torrc')
+        os.chdir("..")
+        if rc != 0: return rc
+        auth.append(fp)
+        bridgeauths.append(auth)
+        i += 1
+    os.chdir("..")
+
     # now we can generate the torrc files, because we know the authorities
-    write_torrc_files(auths)
+    write_torrc_files(dirauths, bridgeauths)
 
     # boot relays equally spread out between 1 and 11 minutes
     secondsPerRelay = 600.0 / (len(exitguards_nodes) + len(exits_nodes) + len(guards_nodes) + len(middles_nodes))
@@ -884,10 +895,18 @@ def parse_consensus(consensus_path):
     
     return validyear, validmonth, sorted(relays, key=lambda relay: relay.getBWConsensusArg())
 
-def write_torrc_files(auths):
-    dirauths = ""
-    for auth in auths:
-        dirauths += "DirServer authority v3ident={0} orport=9111 {1}:9112 {2}\n".format(auth[1], auth[0], auth[2])
+def write_torrc_files(dirauths, bridgeauths):
+    auths_lines = ""
+    # If we're running a bridge authority too, use
+    # 'AlternateDirAuthority' together with 'AlternateBridgeAuthority'
+    # instead of 'DirServer'.
+    dirauthkw = 'DirServer'
+    if len(bridgeauths) > 0:
+        dirauthkw = 'AlternateDirAuthority'
+    for auth in dirauths:
+        auths_lines += "{3} {4} v3ident={0} orport=9111 {1}:9112 {2}\n".format(auth[1], auth[0], auth[2], dirauthkw, auth[0])
+    for auth in bridgeauths:
+        auths_lines += "AlternateBridgeAuthority {4} bridge orport=9111 {1}:9112 {2}\n".format(None, auth[0], auth[2], None, auth[0])
     common = \
 '{0}\
 TestingTorNetwork 1\n\
@@ -903,7 +922,7 @@ CellStatistics 1\n\
 DirReqStatistics 1\n\
 EntryStatistics 1\n\
 ExitPortStatistics 1\n\
-ExtraInfoStatistics 1\n'.format(dirauths)
+ExtraInfoStatistics 1\n'.format(dirauths_string)
     clients = \
 'ORPort 0\n\
 DirPort 0\n\
@@ -921,17 +940,20 @@ AuthoritativeDirectory 1\n\
 ORPort 9111\n\
 DirPort 9112\n\
 SocksPort 0\n' # note - also need exit policy
+    bridgeauths = \
+'BridgeAuthoritativeDir 1\n'
     epreject = 'ExitPolicy "reject *:*"\n'
     epaccept = 'ExitPolicy "accept *:*"\n'
     maxdirty = 'MaxCircuitDirtiness 10 seconds\n'
     with open("authority.torrc", 'wb') as f: print >>f, common + authorities + epreject
+    with open("bridgeauthority.torrc", 'wb') as f: print >>f, common + authorities + bridgeauths + epreject
     with open("exitguard.torrc", 'wb') as f: print >>f, common + relays + epaccept
     with open("guard.torrc", 'wb') as f: print >>f, common + relays + epreject
     with open("exit.torrc", 'wb') as f: print >>f, common + relays + epaccept
     with open("middle.torrc", 'wb') as f: print >>f, common + relays + epreject
     with open("client.torrc", 'wb') as f: print >>f, common + clients
     with open("torperf.torrc", 'wb') as f: print >>f, common + clients + maxdirty
-    log("finished generating:\n{0}/authority.torrc\n{0}/exitguard.torrc\n{0}/guard.torrc\n{0}/exit.torrc\n{0}/middle.torrc\n{0}/client.torrc\n{0}/torperf.torrc".format(os.getcwd()))
+    log("finished generating:\n{0}/authority.torrc\n{0}/bridgeauthority.torrc\n{0}/exitguard.torrc\n{0}/guard.torrc\n{0}/exit.torrc\n{0}/middle.torrc\n{0}/client.torrc\n{0}/torperf.torrc".format(os.getcwd()))
 
 ## helper - test if program is in path
 def which(program):
