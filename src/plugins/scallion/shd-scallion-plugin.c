@@ -68,7 +68,7 @@ static void _scallion_new(gint argc, gchar* argv[]) {
 	} else if(g_ascii_strncasecmp(tortype, "client", strlen("client")) == 0) {
 		ntype = VTOR_CLIENT;
 	} else {
-		scallion.shadowlibFuncs->log(SHADOW_LOG_LEVEL_MESSAGE, __FUNCTION__, "Unrecognized torrent type: %s", usage);
+		scallion.shadowlibFuncs->log(SHADOW_LOG_LEVEL_MESSAGE, __FUNCTION__, "Unrecognized relay type: %s", usage);
 		return;
 	}
 
